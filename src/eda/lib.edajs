@@ -1,0 +1,547 @@
+// In-editor helper library. Evaluated once per connection inside EasyEDA Pro
+// (scope: eda, console, runtime). Must `return` an object of helpers.
+// Units: schematic = native units (0.01 inch); PCB = mil (the Node side converts mm <-> mil).
+
+const L = {};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+L.sleep = sleep;
+const round = (v, d = 3) => (typeof v === 'number' ? Math.round(v * 10 ** d) / 10 ** d : v);
+L.round = round;
+
+async function withTimeout(p, ms, label) {
+	let t;
+	const r = await Promise.race([p, new Promise((res) => (t = setTimeout(() => res({ __timeout: true }), ms)))]);
+	clearTimeout(t);
+	if (r && r.__timeout) throw new Error(`${label || 'EasyEDA call'} did not finish within ${ms} ms (EasyEDA may be waiting on a dialog or a hidden window).`);
+	return r;
+}
+L.withTimeout = withTimeout;
+
+/* ------------------------------ UI helpers ------------------------------ */
+
+function allDocs() {
+	const docs = [document];
+	for (const f of document.querySelectorAll('iframe')) {
+		try {
+			if (f.contentDocument) docs.push(f.contentDocument);
+		} catch (e) {}
+	}
+	return docs;
+}
+L.visibleButtons = () => {
+	const out = [];
+	for (const d of allDocs())
+		for (const b of d.querySelectorAll('button')) {
+			const t = (b.textContent || '').trim();
+			if (t && (b.offsetWidth || b.offsetHeight)) out.push(t);
+		}
+	return out;
+};
+/** Click the first visible button whose text matches (string = exact, RegExp source otherwise). */
+L.clickButton = (text) => {
+	const re = text instanceof RegExp ? text : null;
+	for (const d of allDocs())
+		for (const b of d.querySelectorAll('button')) {
+			const t = (b.textContent || '').trim();
+			if (!(b.offsetWidth || b.offsetHeight)) continue;
+			if (re ? re.test(t) : t === text) {
+				b.click();
+				return t;
+			}
+		}
+	return null;
+};
+/** Run an API call that may open a confirmation dialog; auto-click matching buttons while it runs. */
+L.withAutoConfirm = async (fnPromiseFactory, buttons, ms = 30000) => {
+	let done = false;
+	const clicked = [];
+	const watcher = (async () => {
+		const t0 = Date.now();
+		while (!done && Date.now() - t0 < ms) {
+			await sleep(300);
+			for (const b of buttons) {
+				const c = L.clickButton(b);
+				if (c) clicked.push(c);
+			}
+		}
+	})();
+	try {
+		const r = await withTimeout(fnPromiseFactory(), ms, 'dialog-confirmed call');
+		await sleep(400);
+		for (const b of buttons) {
+			const c = L.clickButton(b);
+			if (c) clicked.push(c);
+		}
+		return { result: r, clicked };
+	} finally {
+		done = true;
+		await watcher;
+	}
+};
+
+/* ------------------------------ images ------------------------------ */
+
+L.isVisible = () => document.visibilityState === 'visible';
+
+/** Rasterise an SVG string to a PNG Blob inside the page (works while the window is hidden). */
+L.rasterizeSvg = async (svg, width, height) => {
+	const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+	try {
+		const img = new Image();
+		img.decoding = 'sync';
+		await new Promise((res, rej) => {
+			img.onload = res;
+			img.onerror = () => rej(new Error('SVG decode failed'));
+			img.src = url;
+		});
+		const c = document.createElement('canvas');
+		c.width = width;
+		c.height = height;
+		const ctx = c.getContext('2d');
+		ctx.drawImage(img, 0, 0, width, height);
+		return await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/png'));
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+};
+
+/* ------------------------------ documents ------------------------------ */
+
+L.projectInfo = async () => {
+	const p = await eda.dmt_Project.getCurrentProjectInfo();
+	if (!p) return null;
+	const boards = [];
+	const others = [];
+	for (const item of p.data || []) {
+		if (item.itemType === 'Board') {
+			boards.push({
+				name: item.name,
+				schematic: item.schematic && { uuid: item.schematic.uuid, name: item.schematic.name, pages: (item.schematic.page || []).map((pg) => ({ uuid: pg.uuid, name: pg.name })) },
+				pcb: item.pcb && { uuid: item.pcb.uuid, name: item.pcb.name },
+			});
+		} else if (item.itemType === 'Schematic') others.push({ type: 'schematic', uuid: item.uuid, name: item.name, pages: (item.page || []).map((pg) => ({ uuid: pg.uuid, name: pg.name })) });
+		else if (item.itemType === 'PCB') others.push({ type: 'pcb', uuid: item.uuid, name: item.name });
+		else others.push({ type: item.itemType, uuid: item.uuid, name: item.name });
+	}
+	const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+	return { uuid: p.uuid, name: p.friendlyName, path: p.name, boards, others, active: cur ? { type: ({ 1: 'schematic', 3: 'pcb', 2: 'symbol', 4: 'footprint' })[cur.documentType] || cur.documentType, uuid: cur.uuid } : null };
+};
+
+/** Re-activate the tab the user had open before a tool switched documents. */
+L.restoreTab = async () => {
+	const t = L._returnTab;
+	L._returnTab = null;
+	if (!t) return false;
+	const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+	if (cur && cur.tabId === t) return false;
+	try { return await eda.dmt_EditorControl.activateDocument(t); } catch (e) { return false; }
+};
+
+L.activeDocType = async () => {
+	const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+	if (!cur) return null;
+	return ({ 1: 'schematic', 3: 'pcb' })[cur.documentType] || String(cur.documentType);
+};
+
+/** Make sure a schematic page (or PCB) is the active document. kind: 'schematic' | 'pcb'; uuid optional. */
+L._returnTab = null;
+L.ensureDoc = async (kind, uuid) => {
+	const cur = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+	const want = kind === 'pcb' ? 3 : 1;
+	if (cur && cur.documentType === want && (!uuid || cur.uuid === uuid)) return cur.uuid;
+	// remember where the user was so we can put them back afterwards
+	if (cur && cur.tabId && !L._returnTab) L._returnTab = cur.tabId;
+	if (!uuid) {
+		const info = await L.projectInfo();
+		if (!info) throw new Error('No project is open in EasyEDA.');
+		const b = info.boards[0];
+		if (kind === 'pcb') uuid = (b && b.pcb && b.pcb.uuid) || (info.others.find((o) => o.type === 'pcb') || {}).uuid;
+		else uuid = (b && b.schematic && b.schematic.pages[0] && b.schematic.pages[0].uuid) || ((info.others.find((o) => o.type === 'schematic') || {}).pages || [])[0]?.uuid;
+		if (!uuid) throw new Error(`The project has no ${kind} document.`);
+	}
+	await eda.dmt_EditorControl.openDocument(uuid);
+	for (let i = 0; i < 30; i++) {
+		await sleep(200);
+		const c = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+		if (c && c.uuid === uuid) {
+			await sleep(300);
+			return uuid;
+		}
+	}
+	throw new Error(`Could not activate ${kind} document ${uuid}.`);
+};
+
+/* ------------------------------ devices ------------------------------ */
+
+const devCache = new Map();
+L.findDevice = async (spec) => {
+	if (spec.deviceUuid) {
+		const d = await eda.lib_Device.get(spec.deviceUuid, spec.libraryUuid);
+		if (!d) throw new Error(`Device ${spec.deviceUuid} not found.`);
+		return d;
+	}
+	if (spec.lcsc) {
+		const code = String(spec.lcsc).toUpperCase();
+		if (devCache.has(code)) return devCache.get(code);
+		const list = (await eda.lib_Device.getByLcscIds([code], undefined, false)) || [];
+		const d = list.find((x) => String(x.supplierId).toUpperCase() === code);
+		if (!d) throw new Error(`LCSC part ${code} has no EasyEDA device in the system library (exact match required).`);
+		devCache.set(code, d);
+		return d;
+	}
+	if (spec.keyword) {
+		const list = await eda.lib_Device.search(spec.keyword, undefined, undefined, undefined, 10, 1);
+		if (!list || !list.length) throw new Error(`No library device matches "${spec.keyword}".`);
+		return list[0];
+	}
+	throw new Error('Part spec needs lcsc, deviceUuid or keyword.');
+};
+L.searchDevices = async (keyword, limit = 20, page = 1) => {
+	const list = (await eda.lib_Device.search(keyword, undefined, undefined, undefined, limit, page)) || [];
+	return list.map((d) => ({
+		lcsc: d.supplierId,
+		name: d.name || d.manufacturerId,
+		mpn: d.manufacturerId,
+		manufacturer: d.manufacturer,
+		footprint: d.footprintName,
+		description: d.description,
+		jlcClass: d.otherProperty && d.otherProperty['JLCPCB Part Class'],
+		deviceUuid: d.uuid,
+		libraryUuid: d.libraryUuid,
+	}));
+};
+
+/* ------------------------------ schematic ------------------------------ */
+
+const val = (c) => {
+	const op = c.getState_OtherProperty ? c.getState_OtherProperty() || {} : {};
+	return op.Value || op.value || '';
+};
+
+L.schPins = async (id) => {
+	const pins = (await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(id)) || [];
+	return pins.map((p) => ({
+		pid: p.getState_PrimitiveId(),
+		number: p.getState_PinNumber(),
+		name: p.getState_PinName(),
+		x: round(p.getState_X()),
+		y: round(p.getState_Y()),
+		rotation: p.getState_Rotation(),
+		pinLength: p.getState_PinLength ? p.getState_PinLength() : 10,
+		type: p.getState_PinType ? p.getState_PinType() : undefined,
+		noConnected: p.getState_NoConnected ? p.getState_NoConnected() : false,
+	}));
+};
+
+L.compSummary = async (c, withPins) => {
+	const id = c.getState_PrimitiveId();
+	const type = c.getState_ComponentType();
+	const out = {
+		id,
+		type,
+		designator: c.getState_Designator() || '',
+		x: round(c.getState_X()),
+		y: round(c.getState_Y()),
+		rotation: c.getState_Rotation(),
+		mirror: c.getState_Mirror(),
+	};
+	if (type === 'part') {
+		out.value = val(c);
+		out.lcsc = c.getState_SupplierId() || '';
+		out.mpn = c.getState_ManufacturerId() || '';
+		const fp = c.getState_Footprint();
+		out.footprint = fp && fp.name;
+		out.addIntoBom = c.getState_AddIntoBom();
+		out.subPart = c.getState_SubPartName();
+	} else {
+		out.net = c.getState_Net() || '';
+	}
+	try {
+		const bb = await eda.sch_Primitive.getPrimitivesBBox([id]);
+		if (bb) out.bbox = { minX: round(bb.minX), minY: round(bb.minY), maxX: round(bb.maxX), maxY: round(bb.maxY) };
+	} catch (e) {}
+	if (withPins) out.pins = await L.schPins(id);
+	return out;
+};
+
+L.schWires = async () => {
+	const ws = (await eda.sch_PrimitiveWire.getAll()) || [];
+	return ws.map((w) => {
+		const line = w.getState_Line();
+		const segs = [];
+		const flat = Array.isArray(line[0]) ? line : [line];
+		for (const poly of flat) for (let i = 0; i + 3 < poly.length; i += 4) segs.push([round(poly[i]), round(poly[i + 1]), round(poly[i + 2]), round(poly[i + 3])]);
+		// polylines are returned as segment pairs; if odd shape, fall back to consecutive points
+		if (!segs.length) for (const poly of flat) for (let i = 0; i + 3 < poly.length; i += 2) segs.push([poly[i], poly[i + 1], poly[i + 2], poly[i + 3]]);
+		return { id: w.getState_PrimitiveId(), net: w.getState_Net() || '', segs };
+	});
+};
+
+L.schState = async (opts = {}) => {
+	const comps = (await eda.sch_PrimitiveComponent.getAll(undefined, false)) || [];
+	const components = [];
+	for (const c of comps) components.push(await L.compSummary(c, opts.pins !== false));
+	const wires = opts.wires === false ? [] : await L.schWires();
+	let texts = [];
+	if (opts.texts) {
+		try {
+			texts = ((await eda.sch_PrimitiveText.getAll()) || []).map((t) => ({ id: t.getState_PrimitiveId(), text: t.getState_Content ? t.getState_Content() : '', x: t.getState_X(), y: t.getState_Y() }));
+		} catch (e) {}
+	}
+	let graphics = { rects: [], texts: [] };
+	if (opts.graphics !== false) {
+		try {
+			graphics.rects = ((await eda.sch_PrimitiveRectangle.getAll()) || []).map((r) => ({ id: r.getState_PrimitiveId(), x: r.getState_TopLeftX(), y: -r.getState_TopLeftY(), w: r.getState_Width(), h: r.getState_Height(), color: r.getState_Color && r.getState_Color(), lineType: r.getState_LineType && r.getState_LineType() }));
+		} catch (e) {}
+		try {
+			graphics.texts = ((await eda.sch_PrimitiveText.getAll()) || []).map((t) => ({ id: t.getState_PrimitiveId(), x: t.getState_X(), y: t.getState_Y(), text: t.getState_Content(), size: t.getState_FontSize && t.getState_FontSize(), color: t.getState_TextColor && t.getState_TextColor(), bold: t.getState_Bold && t.getState_Bold() }));
+		} catch (e) {}
+	}
+	let page = null;
+	try {
+		const pg = await eda.dmt_Schematic.getCurrentSchematicPageInfo();
+		if (pg) {
+			const tb = pg.titleBlockData || {};
+			page = { uuid: pg.uuid, name: pg.name, width: Number((tb.Width || {}).value) || undefined, height: Number((tb.Height || {}).value) || undefined, size: (tb['Page Size'] || {}).value };
+		}
+	} catch (e) {}
+	return { page, components, wires, texts, graphics };
+};
+
+L.findSchComponent = async (ref) => {
+	if (!ref) throw new Error('component reference missing');
+	if (/^[0-9a-f]{16}$/i.test(ref)) {
+		const c = await eda.sch_PrimitiveComponent.get(ref);
+		if (c) return c;
+	}
+	const all = (await eda.sch_PrimitiveComponent.getAll(undefined, false)) || [];
+	const hit = all.filter((c) => c.getState_Designator() === ref);
+	if (hit.length === 1) return hit[0];
+	if (hit.length > 1) throw new Error(`Designator ${ref} is used by ${hit.length} parts — annotate first or use the primitive id.`);
+	throw new Error(`No schematic part ${ref}.`);
+};
+
+/**
+ * Safe modify: EasyEDA's modify() wipes otherProperty and resets supplierId unless the full set is
+ * sent again. We always read the current state, merge, send everything, then verify.
+ */
+L.safeModifySch = async (c, patch) => {
+	const id = c.getState_PrimitiveId();
+	const cur = {
+		x: round(c.getState_X(), 2),
+		y: round(c.getState_Y(), 2),
+		rotation: c.getState_Rotation(),
+		mirror: c.getState_Mirror(),
+		addIntoBom: c.getState_AddIntoBom(),
+		addIntoPcb: c.getState_AddIntoPcb(),
+		designator: c.getState_Designator(),
+		name: c.getState_Name(),
+		manufacturer: c.getState_Manufacturer(),
+		manufacturerId: c.getState_ManufacturerId(),
+		supplier: c.getState_Supplier(),
+		supplierId: c.getState_SupplierId(),
+		otherProperty: { ...(c.getState_OtherProperty() || {}) },
+	};
+	const next = { ...cur, ...patch, otherProperty: { ...cur.otherProperty, ...(patch.otherProperty || {}) } };
+	for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
+	const res = await eda.sch_PrimitiveComponent.modify(id, next);
+	const after = (await eda.sch_PrimitiveComponent.get(id)) || res;
+	// verify & repair attributes if EasyEDA dropped them
+	const op = (after && after.getState_OtherProperty()) || {};
+	const lost = Object.keys(next.otherProperty).filter((k) => next.otherProperty[k] !== '' && (op[k] === '' || op[k] === undefined));
+	if (after && (lost.length || (next.supplierId && after.getState_SupplierId() !== next.supplierId))) {
+		await eda.sch_PrimitiveComponent.modify(id, { supplierId: next.supplierId, supplier: next.supplier, manufacturer: next.manufacturer, manufacturerId: next.manufacturerId, otherProperty: next.otherProperty });
+	}
+	return id;
+};
+
+L.placeSchPart = async (spec) => {
+	const d = await L.findDevice(spec);
+	const c = await eda.sch_PrimitiveComponent.create(d, spec.x, spec.y, spec.subPart, spec.rotation || 0, !!spec.mirror, spec.addIntoBom !== false, spec.addIntoPcb !== false);
+	if (!c) throw new Error(`EasyEDA refused to place ${spec.lcsc || spec.deviceUuid || spec.keyword}.`);
+	const patch = {};
+	if (spec.designator) patch.designator = spec.designator;
+	if (spec.value || spec.attributes) patch.otherProperty = { ...(spec.attributes || {}), ...(spec.value ? { Value: spec.value } : {}) };
+	if (Object.keys(patch).length) await L.safeModifySch(c, patch);
+	const fresh = await eda.sch_PrimitiveComponent.get(c.getState_PrimitiveId());
+	return L.compSummary(fresh || c, true);
+};
+
+L.createWire = async (points, net) => {
+	const flat = [];
+	for (const p of points) flat.push(p[0], p[1]);
+	const w = await eda.sch_PrimitiveWire.create(flat, net || undefined);
+	if (!w) throw new Error('Wire creation failed at ' + JSON.stringify(points[0]));
+	return w.getState_PrimitiveId();
+};
+
+L.createFlag = async (kind, net, x, y, rotation) => {
+	let c;
+	const k = String(kind).toLowerCase();
+	if (k === 'power' || k === 'ground' || k === 'analogground' || k === 'protectground') {
+		const id = { power: 'Power', ground: 'Ground', analogground: 'AnalogGround', protectground: 'ProtectGround' }[k];
+		c = await eda.sch_PrimitiveComponent.createNetFlag(id, net, x, y, rotation || 0, false);
+	} else if (k === 'in' || k === 'out' || k === 'bi') {
+		c = await eda.sch_PrimitiveComponent.createNetPort(k.toUpperCase(), net, x, y, rotation || 0, false);
+	} else if (k === 'short') {
+		c = await eda.sch_PrimitiveComponent.createShortCircuitFlag(x, y, rotation || 0, false);
+	} else throw new Error('Unknown flag kind ' + kind);
+	if (!c) throw new Error(`Could not create ${kind} flag at (${x}, ${y}).`);
+	return { id: c.getState_PrimitiveId(), pins: await L.schPins(c.getState_PrimitiveId()) };
+};
+
+L.setNoConnect = async (compRef, pinNumber, on = true) => {
+	const c = await L.findSchComponent(compRef);
+	const pins = (await eda.sch_PrimitiveComponent.getAllPinsByPrimitiveId(c.getState_PrimitiveId())) || [];
+	const p = pins.find((x) => x.getState_PinNumber() === String(pinNumber) || x.getState_PinName() === String(pinNumber));
+	if (!p) throw new Error(`${compRef} has no pin ${pinNumber}`);
+	await eda.sch_PrimitivePin.modify(p.getState_PrimitiveId(), { noConnected: !!on });
+	return true;
+};
+
+/* ------------------------------ PCB ------------------------------ */
+
+L.pcbComponents = async (withPads) => {
+	const comps = (await eda.pcb_PrimitiveComponent.getAll()) || [];
+	const out = [];
+	for (const c of comps) {
+		const id = c.getState_PrimitiveId();
+		const o = {
+			id,
+			designator: c.getState_Designator() || '',
+			x: round(c.getState_X()),
+			y: round(c.getState_Y()),
+			rotation: c.getState_Rotation(),
+			layer: c.getState_Layer(),
+			locked: c.getState_PrimitiveLock(),
+			footprint: (c.getState_Footprint() || {}).name,
+			lcsc: c.getState_SupplierId ? c.getState_SupplierId() : undefined,
+			value: ((c.getState_OtherProperty && c.getState_OtherProperty()) || {}).Value,
+		};
+		try {
+			const bb = await eda.pcb_Primitive.getPrimitivesBBox([id]);
+			if (bb) o.bbox = { minX: round(bb.minX), minY: round(bb.minY), maxX: round(bb.maxX), maxY: round(bb.maxY) };
+		} catch (e) {}
+		if (withPads) {
+			const pads = (await eda.pcb_PrimitiveComponent.getAllPinsByPrimitiveId(id)) || [];
+			o.pads = pads.map((p) => {
+				const shape = p.getState_Pad() || [];
+				const hole = p.getState_Hole();
+				return {
+					number: p.getState_PadNumber(),
+					net: p.getState_Net() || '',
+					x: round(p.getState_X()),
+					y: round(p.getState_Y()),
+					rotation: p.getState_Rotation(),
+					layer: p.getState_Layer(),
+					shape: shape[0],
+					w: round(shape[1]),
+					h: round(shape[2]),
+					hole: hole ? [hole[0], round(hole[1]), round(hole[2])] : null,
+				};
+			});
+		}
+		out.push(o);
+	}
+	return out;
+};
+
+L.pcbTracks = async () => {
+	const lines = (await eda.pcb_PrimitiveLine.getAll()) || [];
+	return lines.map((t) => ({ id: t.getState_PrimitiveId(), net: t.getState_Net() || '', layer: t.getState_Layer(), x1: round(t.getState_StartX()), y1: round(t.getState_StartY()), x2: round(t.getState_EndX()), y2: round(t.getState_EndY()), w: round(t.getState_LineWidth()) }));
+};
+L.pcbArcs = async () => {
+	const arcs = (await eda.pcb_PrimitiveArc.getAll()) || [];
+	return arcs.map((t) => ({ id: t.getState_PrimitiveId(), net: t.getState_Net() || '', layer: t.getState_Layer(), x1: round(t.getState_StartX()), y1: round(t.getState_StartY()), x2: round(t.getState_EndX()), y2: round(t.getState_EndY()), angle: t.getState_ArcAngle(), w: round(t.getState_LineWidth()) }));
+};
+L.pcbVias = async () => {
+	const vs = (await eda.pcb_PrimitiveVia.getAll()) || [];
+	return vs.map((v) => ({ id: v.getState_PrimitiveId(), net: v.getState_Net() || '', x: round(v.getState_X()), y: round(v.getState_Y()), d: round(v.getState_Diameter()), hole: round(v.getState_HoleDiameter()) }));
+};
+L.pcbOutline = async () => {
+	const pls = (await eda.pcb_PrimitivePolyline.getAll()) || [];
+	const out = [];
+	for (const p of pls) {
+		if (p.getState_Layer() !== 11) continue;
+		const poly = p.getState_Polygon();
+		out.push({ id: p.getState_PrimitiveId(), source: poly && poly.getSource ? poly.getSource() : poly, width: p.getState_LineWidth ? p.getState_LineWidth() : 0 });
+	}
+	const lines = ((await eda.pcb_PrimitiveLine.getAll()) || []).filter((t) => t.getState_Layer() === 11).map((t) => ({ id: t.getState_PrimitiveId(), seg: [t.getState_StartX(), t.getState_StartY(), t.getState_EndX(), t.getState_EndY()] }));
+	const arcs = ((await eda.pcb_PrimitiveArc.getAll()) || []).filter((t) => t.getState_Layer() === 11).map((t) => ({ id: t.getState_PrimitiveId() }));
+	let bbox = null;
+	const ids = [...out.map((o) => o.id), ...lines.map((l) => l.id), ...arcs.map((a) => a.id)];
+	if (ids.length) {
+		const bb = await eda.pcb_Primitive.getPrimitivesBBox(ids);
+		// the bbox includes the outline stroke; the board edge is the stroke centre
+		const hw = Math.max(0, ...out.map((o) => o.width || 0)) / 2;
+		if (bb) bbox = { minX: round(bb.minX + hw), minY: round(bb.minY + hw), maxX: round(bb.maxX - hw), maxY: round(bb.maxY - hw) };
+	}
+	return { polylines: out, lines, arcs, bbox };
+};
+L.pcbPours = async () => {
+	const ps = (await eda.pcb_PrimitivePour.getAll()) || [];
+	return ps.map((p) => ({ id: p.getState_PrimitiveId(), net: p.getState_Net(), layer: p.getState_Layer(), name: p.getState_PourName && p.getState_PourName() }));
+};
+
+L.findPcbComponent = async (ref) => {
+	const all = (await eda.pcb_PrimitiveComponent.getAll()) || [];
+	if (/^[0-9a-f]{16}$/i.test(ref)) {
+		const c = all.find((x) => x.getState_PrimitiveId() === ref);
+		if (c) return c;
+	}
+	const hit = all.filter((c) => c.getState_Designator() === ref);
+	if (hit.length === 1) return hit[0];
+	if (hit.length > 1) throw new Error(`Designator ${ref} appears ${hit.length} times on the PCB.`);
+	throw new Error(`No PCB component ${ref}. Did you sync the schematic to the PCB?`);
+};
+
+L.safeModifyPcb = async (c, patch) => {
+	const id = c.getState_PrimitiveId();
+	const cur = {
+		layer: c.getState_Layer(),
+		x: c.getState_X(),
+		y: c.getState_Y(),
+		rotation: c.getState_Rotation(),
+		primitiveLock: c.getState_PrimitiveLock(),
+		addIntoBom: c.getState_AddIntoBom(),
+		designator: c.getState_Designator(),
+		name: c.getState_Name(),
+		manufacturer: c.getState_Manufacturer(),
+		manufacturerId: c.getState_ManufacturerId(),
+		supplier: c.getState_Supplier(),
+		supplierId: c.getState_SupplierId(),
+		otherProperty: { ...(c.getState_OtherProperty() || {}) },
+	};
+	const next = { ...cur, ...patch, otherProperty: { ...cur.otherProperty, ...(patch.otherProperty || {}) } };
+	for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
+	await eda.pcb_PrimitiveComponent.modify(id, next);
+	return id;
+};
+
+L.polygon = (source) => eda.pcb_MathPolygon.createPolygon(source);
+
+/** Re-fill all copper pours. Uses the API (per-pour rebuildCopperRegion / rebuildAllCopperRegions); Shift+B as last resort. */
+L.rebuildPours = async () => {
+	const before = (await eda.pcb_PrimitivePoured.getAll().catch(() => [])).length;
+	let method = 'api';
+	try {
+		if (typeof eda.pcb_PrimitivePour.rebuildAllCopperRegions === 'function') await eda.pcb_PrimitivePour.rebuildAllCopperRegions();
+		else for (const p of (await eda.pcb_PrimitivePour.getAll()) || []) await p.rebuildCopperRegion();
+	} catch (e) {
+		method = 'shortcut';
+		for (const d of allDocs()) for (const t of [d, d.body]) for (const type of ['keydown', 'keyup']) t && t.dispatchEvent(new KeyboardEvent(type, { key: 'B', code: 'KeyB', keyCode: 66, which: 66, shiftKey: true, bubbles: true, cancelable: true }));
+		await sleep(3000);
+	}
+	const after = (await eda.pcb_PrimitivePoured.getAll().catch(() => [])).length;
+	return { filledRegions: after, before, method };
+};
+
+/**
+ * Create a through via. IMPORTANT: designRuleBlindViaName must be null — the API default ("")
+ * makes EasyEDA treat the via as an unnamed blind via that connects nothing (DRC "Connection Error").
+ */
+L.createVia = (net, x, y, hole, diameter) => eda.pcb_PrimitiveVia.create(net || '', x, y, hole, diameter, 0, null, null, false);
+
+L.netColor = async () => null;
+
+return L;

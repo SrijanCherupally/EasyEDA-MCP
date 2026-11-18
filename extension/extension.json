@@ -1,0 +1,33 @@
+{
+	"name": "easyeda-mcp",
+	"uuid": "e7a1c0de5eda4c0ab7d3f1a2b3c4d5e6",
+	"displayName": "EasyEDA MCP",
+	"description": "Live bridge between EasyEDA Pro and AI agents (Claude Code, Codex, any MCP client). Full API access, snapshots, auto-reconnect.",
+	"version": "1.0.3",
+	"publisher": "easyeda-mcp",
+	"engines": { "eda": "^2.2.0" },
+	"license": "MIT",
+	"repository": { "type": "github", "url": "https://github.com/SrijanCh/EasyEDA-MCP" },
+	"categories": "Other",
+	"keywords": ["MCP", "AI", "Automation", "Claude"],
+	"homepage": "https://github.com/SrijanCh/EasyEDA-MCP",
+	"bugs": "https://github.com/SrijanCh/EasyEDA-MCP/issues",
+	"entry": "./dist/index",
+	"activationEvents": { "onStartupFinished": true },
+	"dependentExtensions": {},
+	"headerMenus": {
+		"home": [{ "id": "easyeda-mcp", "title": "MCP", "menuItems": [
+			{ "id": "status", "title": "Status", "registerFn": "showStatus" },
+			{ "id": "reconnect", "title": "Reconnect", "registerFn": "reconnect" },
+			{ "id": "port", "title": "Set Hub Port…", "registerFn": "setPort" }
+		] }],
+		"sch": [{ "id": "easyeda-mcp", "title": "MCP", "menuItems": [
+			{ "id": "status", "title": "Status", "registerFn": "showStatus" },
+			{ "id": "reconnect", "title": "Reconnect", "registerFn": "reconnect" }
+		] }],
+		"pcb": [{ "id": "easyeda-mcp", "title": "MCP", "menuItems": [
+			{ "id": "status", "title": "Status", "registerFn": "showStatus" },
+			{ "id": "reconnect", "title": "Reconnect", "registerFn": "reconnect" }
+		] }]
+	}
+}

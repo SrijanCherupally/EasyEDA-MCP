@@ -1,0 +1,64 @@
+{
+  "name": "easyeda-live-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for live, end-to-end PCB design in EasyEDA Pro: readable schematics, live JLCPCB stock/class, placement, autorouting, pours, DRC and fab exports.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node scripts/test.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "easyeda",
+    "easyeda-pro",
+    "jlcpcb",
+    "lcsc",
+    "pcb",
+    "schematic",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "autorouter"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.23.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "fflate": "^0.8.3",
+    "sval": "^0.6.12",
+    "typescript": "^5.9.3"
+  },
+  "bin": {
+    "easyeda-live-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/index.js",
+    "dist/hub.js",
+    "dist/cli.js",
+    "dist/easyeda-mcp.eext",
+    "assets",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/EasyEDA-MCP.git"
+  },
+  "homepage": "https://github.com/OWNER/EasyEDA-MCP#readme",
+  "bugs": {
+    "url": "https://github.com/OWNER/EasyEDA-MCP/issues"
+  }
+}
