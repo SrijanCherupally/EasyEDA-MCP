@@ -10,7 +10,7 @@ import Sval from 'sval';
 
 declare const eda: any;
 
-const RUNTIME_VERSION = '1.0.3';
+const RUNTIME_VERSION = '1.0.4';
 const LOADED_AT = Date.now();
 const DEFAULT_PORT = 18765;
 const HEARTBEAT_TIMEOUT_MS = 15000;
@@ -34,6 +34,8 @@ const state = {
 	started: false,
 	watchdog: undefined as any,
 	retryTimer: undefined as any,
+	retryAt: 0,
+	connectDeadline: 0,
 	queue: Promise.resolve() as Promise<unknown>,
 	port: DEFAULT_PORT,
 };
@@ -330,10 +332,8 @@ function markDisconnected() {
 function scheduleRetry() {
 	if (state.retryTimer) return;
 	const delay = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * Math.pow(1.5, Math.min(state.attempt, 6)));
-	state.retryTimer = setTimeout(() => {
-		state.retryTimer = undefined;
-		openSocket();
-	}, delay);
+	state.retryTimer = true;
+	state.retryAt = Date.now() + delay;
 }
 
 function closeSocket() {
@@ -397,25 +397,48 @@ function openSocket() {
 		scheduleRetry();
 		return;
 	}
-	// If the connected callback never fires, retry.
-	setTimeout(() => {
-		if (id === state.socketId && !state.connected && Date.now() - attemptAt >= 2900) {
-			state.connecting = false;
-			scheduleRetry();
-		}
-	}, 3000);
+	// If the connected callback never fires, the watchdog tick retries (see connectDeadline).
+	state.connectDeadline = attemptAt + 3000;
+	void id;
+}
+
+/**
+ * Timers in a hidden Electron/Chromium window are throttled to about once a minute, which made
+ * reconnects slow. A tiny Web Worker keeps ticking at full speed and drives the watchdog instead.
+ */
+function startTicker(fn: () => void, ms: number) {
+	try {
+		const src = `setInterval(() => postMessage(0), ${ms});`;
+		const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+		w.onmessage = () => fn();
+		return { stop: () => w.terminate() };
+	} catch {
+		const h = setInterval(fn, ms);
+		return { stop: () => clearInterval(h) };
+	}
 }
 
 function startWatchdog() {
 	if (state.watchdog) return;
-	state.watchdog = setInterval(() => {
+	state.watchdog = startTicker(() => {
+		// retries are scheduled as timestamps and fired from the (unthrottled) tick
+		if (state.retryAt && Date.now() >= state.retryAt) {
+			state.retryAt = 0;
+			state.retryTimer = undefined;
+			openSocket();
+		}
+		if (state.connecting && !state.connected && state.connectDeadline && Date.now() > state.connectDeadline) {
+			state.connectDeadline = 0;
+			state.connecting = false;
+			scheduleRetry();
+		}
 		if (state.connected && Date.now() - state.lastMessageAt > HEARTBEAT_TIMEOUT_MS) {
 			state.lastError = 'heartbeat timeout';
 			closeSocket();
 			markDisconnected();
 		}
 		if (!state.connected && !state.connecting && !state.retryTimer) scheduleRetry();
-	}, 2000);
+	}, 1000);
 }
 
 function start() {
@@ -443,10 +466,8 @@ export function reconnect() {
 	state.connected = false;
 	state.connecting = false;
 	state.attempt = 0;
-	if (state.retryTimer) {
-		clearTimeout(state.retryTimer);
-		state.retryTimer = undefined;
-	}
+	state.retryTimer = undefined;
+	state.retryAt = 0;
 	start();
 	toast('EasyEDA MCP: reconnecting…');
 }

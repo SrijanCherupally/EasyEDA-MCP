@@ -266,8 +266,9 @@ setInterval(() => {
 			}
 		}
 	}
-	if (agents.size === 0 && Date.now() - lastAgentActivity > IDLE_EXIT_MS) {
-		log('idle with no agents — exiting');
+	// stay up while any EasyEDA window is connected, so editors never have to reconnect
+	if (agents.size === 0 && editors.size === 0 && Date.now() - lastAgentActivity > IDLE_EXIT_MS) {
+		log('idle with no agents and no editors — exiting');
 		process.exit(0);
 	}
 }, 5000).unref?.();
