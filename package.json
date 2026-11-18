@@ -55,10 +55,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/EasyEDA-MCP.git"
+    "url": "git+https://github.com/SrijanCherupally/EasyEDA-MCP.git"
   },
-  "homepage": "https://github.com/OWNER/EasyEDA-MCP#readme",
+  "homepage": "https://github.com/SrijanCherupally/EasyEDA-MCP#readme",
   "bugs": {
-    "url": "https://github.com/OWNER/EasyEDA-MCP/issues"
+    "url": "https://github.com/SrijanCherupally/EasyEDA-MCP/issues"
   }
 }
