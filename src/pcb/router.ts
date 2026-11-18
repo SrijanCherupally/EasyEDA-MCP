@@ -347,6 +347,75 @@ export class PcbRouter {
 		const idx = pads.map((_, i) => i).sort((a, b) => Math.hypot(pads[a].x - cxm, pads[a].y - cym) - Math.hypot(pads[b].x - cxm, pads[b].y - cym));
 		const first = idx.find((i) => padCells[i].length) ?? idx[0];
 		for (const c of padCells[first]) tree.add(c);
+		// Existing copper of this net (hand-drawn tracks, vias) is part of the tree: pads it already
+		// reaches are NOT routed again, and new connections T into it. This prevents duplicate routes.
+		const existing = this.input.tracks.filter((t) => t.net === net);
+		const existingVias = this.input.vias.filter((v) => v.net === net);
+		if (existing.length || existingVias.length) {
+			const cellsOf: Set<number>[] = [];
+			const addCells = (set: Set<number>, l: number, x1: number, y1: number, x2: number, y2: number) => {
+				const len = Math.hypot(x2 - x1, y2 - y1);
+				const n2 = Math.max(1, Math.ceil(len / (this.g * 0.5)));
+				for (let k = 0; k <= n2; k++) {
+					const x = x1 + ((x2 - x1) * k) / n2,
+						y = y1 + ((y2 - y1) * k) / n2;
+					const i = this.ci(x),
+						j = this.cj(y);
+					if (i >= 0 && j >= 0 && i < this.W && j < this.H) set.add(l * N + j * this.W + i);
+				}
+			};
+			// group existing copper into electrically connected clusters (segments touching or via-linked)
+			const items: { cells: Set<number>; segs: RSeg[]; vias: RVia[] }[] = [];
+			for (const t of existing) {
+				const c = new Set<number>();
+				addCells(c, t.layer, t.x1, t.y1, t.x2, t.y2);
+				items.push({ cells: c, segs: [t], vias: [] });
+			}
+			for (const v of existingVias) {
+				const c = new Set<number>();
+				for (let l = 0; l < this.L; l++) addCells(c, l, v.x, v.y, v.x, v.y);
+				items.push({ cells: c, segs: [], vias: [v] });
+			}
+			// all copper of the net is added to the tree; connected-ness to the first pad is decided below
+			for (const it of items) for (const c of it.cells) tree.add(c);
+			void cellsOf;
+			// a pad counts as already connected only if it touches this copper AND that copper links to the first pad
+			// (flood fill over touching copper starting from the first pad's cells)
+			const pool = new Set(tree);
+			const allPadCells = new Set<number>(padCells.flat());
+			const reach = new Set<number>();
+			const queue: number[] = [];
+			for (const c of padCells[first]) {
+				reach.add(c);
+				queue.push(c);
+			}
+			while (queue.length) {
+				const c = queue.pop()!;
+				const l = Math.floor(c / N),
+					k = c % N;
+				const i = k % this.W,
+					j = (k / this.W) | 0;
+				const nbrs: number[] = [];
+				for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+					const ii = i + di,
+						jj = j + dj;
+					if (ii >= 0 && jj >= 0 && ii < this.W && jj < this.H) nbrs.push(l * N + jj * this.W + ii);
+				}
+				for (let l2 = 0; l2 < this.L; l2++) if (l2 !== l) nbrs.push(l2 * N + k); // via links layers
+				for (const nb of nbrs) {
+					if (reach.has(nb)) continue;
+					const isVia = Math.floor(nb / N) !== l;
+					if (isVia && !existingVias.some((v) => this.ci(v.x) === i && this.cj(v.y) === j)) continue;
+					if (pool.has(nb) || allPadCells.has(nb)) {
+						reach.add(nb);
+						queue.push(nb);
+					}
+				}
+			}
+			// tree = only copper actually connected to the first pad; islands are routed to it like unrouted pads
+			tree.clear();
+			for (const c of reach) tree.add(c);
+		}
 		const remaining = idx.filter((i) => i !== first);
 		const unconnected: string[] = [];
 		while (remaining.length) {

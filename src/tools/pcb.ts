@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { run, text, image, wrap, withEditorVisible, mm2mil, mil2mm } from '../server/ctx.js';
 import { PcbRouter, type RPad, type RSeg, type RVia } from '../pcb/router.js';
 import { place, type PComp } from '../pcb/placer.js';
-import { pcbConnectivity } from '../pcb/connectivity.js';
+import { pcbConnectivity, redundantLoops } from '../pcb/connectivity.js';
 import { normalizeJunctions } from '../pcb/junctions.js';
 import { pcbSvg, polygonPoints, type PcbRenderData } from '../render/svg.js';
 import { isGroundName, isPowerName } from '../sch/connectivity.js';
@@ -69,7 +69,7 @@ export function routerPads(st: Awaited<ReturnType<typeof readPcb>>): RPad[] {
 	return pads;
 }
 
-function connSummary(conn: ReturnType<typeof pcbConnectivity>, pourNets: string[]) {
+function connSummary(conn: ReturnType<typeof pcbConnectivity>, pourNets: string[], loops: { net: string; loops: number; near: [number, number] }[] = []) {
 	const viaPour = conn.nets.filter((n) => n.islands > 1 && pourNets.includes(n.net));
 	const open = conn.nets.filter((n) => n.islands > 1 && !pourNets.includes(n.net));
 	return {
@@ -78,6 +78,7 @@ function connSummary(conn: ReturnType<typeof pcbConnectivity>, pourNets: string[
 		connectedByPour: viaPour.length ? viaPour.map((n) => n.net) : undefined,
 		pourNote: viaPour.length ? 'These nets rely on copper pours; their connectivity is verified by EasyEDA DRC ("Connection Error" items), not by this geometry check.' : undefined,
 		shorts: conn.shorts,
+		redundantRoutes: loops.length ? loops.map((l) => `${l.net}: ${l.loops} closed loop(s) near (${l.near[0].toFixed(2)}, ${l.near[1].toFixed(2)}) mm — two parallel copper paths; delete one (pcb_delete routingOfNets then re-route)`) : undefined,
 		open,
 	};
 }
@@ -137,7 +138,7 @@ export function registerPcb(server: McpServer) {
 				board: st.board ? { ...st.board, width: r3(st.board.maxX - st.board.minX), height: r3(st.board.maxY - st.board.minY) } : 'NO BOARD OUTLINE — create one with pcb_outline',
 				copperLayers: st.copperLayers,
 				components: comps,
-				routing: { ...connSummary(conn, st.pourNets), open: undefined, tracks: st.tracks.length, vias: st.vias.length },
+				routing: { ...connSummary(conn, st.pourNets, redundantLoops(routerPads(st), st.tracks, st.vias)), open: undefined, tracks: st.tracks.length, vias: st.vias.length },
 			};
 			if (conn.shorts.length) out.SHORTS = conn.shorts;
 			if (a.tracks) out.tracks = st.tracks.map((t) => `${t.net || '·'} L${t.layer + 1} ${r3(t.x1)},${r3(t.y1)}→${r3(t.x2)},${r3(t.y2)} w${r3(t.w)}`);
@@ -767,7 +768,7 @@ export function registerPcb(server: McpServer) {
 					note: flat.some((v) => v.errorType === 'Connection Error') ? '"Connection Error" = copper or pads of a net not connected to the rest of that net (unrouted, or tracks that do not end exactly on a pad/via/track end).' : undefined,
 				};
 			}
-			const cs = connSummary(conn, st.pourNets);
+			const cs = connSummary(conn, st.pourNets, redundantLoops(routerPads(st), st.tracks, st.vias));
 			return text({ drc: summary, connectivity: { ...cs, open: undefined } });
 		}),
 	);
@@ -782,7 +783,7 @@ export function registerPcb(server: McpServer) {
 		wrap(async ({ nets }) => {
 			const st = await readPcb({ pads: true });
 			const conn = pcbConnectivity(routerPads(st), st.tracks, st.vias);
-			const cs = connSummary(conn, st.pourNets);
+			const cs = connSummary(conn, st.pourNets, redundantLoops(routerPads(st), st.tracks, st.vias));
 			const list = cs.open.filter((n) => !nets || nets.includes(n.net)).map((n) => ({ net: n.net, islands: n.unrouted.map((i) => i.join(' ')) }));
 			return text({ ...cs, open: undefined, unrouted: list });
 		}),

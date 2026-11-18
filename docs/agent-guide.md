@@ -29,7 +29,7 @@ Units 0.01 inch, Y up; A4 ≈ 1170 × 825, A3 ≈ 1650 × 1170.
 - **Power & critical nets manually:** `pcb_tracks {tracks:[{points:["U1.3",[x,y],"C2.1"], width:0.8}]}` — pad references snap exactly to pads; wide tracks for current (≈0.5 mm per 1 A on 1 oz outer copper as a rough guide).
 - **Power copper areas:** `pcb_copper {kind:"pour", net:"VIN", layer:"top", polygon:[…]}` for input/output/switch-node islands; `kind:"fill"` for solid heat-sink copper; `kind:"keepout"` to protect areas.
 - **Ground (2-layer default):** `pcb_fanout {net:"GND"}` (stub + via for every ground pad) **before** routing signals, then GND pours on top & bottom. 4-layer: inner GND plane. Ground is not routed as tracks unless you ask (`routeGround:true`).
-- **Leftover small signals:** `pcb_autoroute` (skips ground automatically; `nets:[…]` to limit).
+- **Leftover small signals:** `pcb_autoroute` (skips ground automatically; `nets:[…]` to limit). It treats your hand-drawn copper as already routed and only adds missing connections. `pcb_status` reports `redundantRoutes` if a net ever has two parallel paths.
 - `pcb_pour {net:"GND", layers:"both", stitchPitch:6}` — fills, stitches, and fixes any ground pad the pour cannot reach.
 
 ## 5. Finish

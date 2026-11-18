@@ -38,3 +38,29 @@ describe('pcb router', () => {
 		expect(res.stats.connections).toBe(3);
 	});
 });
+
+describe('no duplicate routes over existing copper', () => {
+	const rules = { track: 0.25, clearance: 0.2, viaDiameter: 0.6, viaHole: 0.3, edgeClearance: 0.3 };
+	const base = () => ({
+		board: { minX: 0, minY: 0, maxX: 30, maxY: 20 },
+		pads: [pad('P', 4, 10, [0], 'A.1'), pad('P', 14, 10, [0], 'B.1'), pad('P', 26, 10, [0], 'C.1')],
+		vias: [],
+	});
+	it('does not re-route a net that is already hand-routed', () => {
+		const hand = [
+			{ net: 'P', layer: 0, x1: 4, y1: 10, x2: 14, y2: 10, w: 0.5 },
+			{ net: 'P', layer: 0, x1: 14, y1: 10, x2: 26, y2: 10, w: 0.5 },
+		];
+		const res = new PcbRouter({ ...base(), tracks: hand }, rules).route();
+		expect(res.segments.length).toBe(0);
+		expect(res.failed).toEqual([]);
+	});
+	it('only adds the missing connection and T-joins existing copper', () => {
+		const hand = [{ net: 'P', layer: 0, x1: 4, y1: 10, x2: 14, y2: 10, w: 0.5 }];
+		const res = new PcbRouter({ ...base(), tracks: hand }, rules).route();
+		expect(res.failed).toEqual([]);
+		expect(res.segments.length).toBeGreaterThan(0);
+		// every new segment lies on the C side; nothing is drawn again between A and B
+		for (const s of res.segments) expect(Math.min(s.x1, s.x2) >= 13.5).toBeTruthy();
+	});
+});

@@ -80,3 +80,56 @@ export function pcbConnectivity(pads: RPad[], segs: RSeg[], vias: RVia[]): PcbCo
 	}
 	return { nets, unroutedConnections, routedNets, totalNets: nets.length, shorts };
 }
+
+
+/**
+ * Redundant routes: copper of one net forming a closed loop (two parallel paths between the same
+ * points). Nodes = track ends / via centres / pad centres per layer; every edge or via/pad join that
+ * connects two already-connected nodes closes one loop. A clean routed tree has zero.
+ */
+export function redundantLoops(pads: RPad[], segs: RSeg[], vias: RVia[]): { net: string; loops: number; near: [number, number] }[] {
+	const out: { net: string; loops: number; near: [number, number] }[] = [];
+	const key = (x: number, y: number) => `${Math.round(x * 100)},${Math.round(y * 100)}`;
+	for (const net of new Set(segs.map((t) => t.net).filter(Boolean))) {
+		const parent = new Map<string, string>();
+		const find = (a: string): string => {
+			let r = a;
+			while (parent.get(r) !== r) r = parent.get(r)!;
+			parent.set(a, r);
+			return r;
+		};
+		let loops = 0;
+		let near: [number, number] = [0, 0];
+		const join = (a: string, b: string, at: [number, number]) => {
+			for (const k of [a, b]) if (!parent.has(k)) parent.set(k, k);
+			if (find(a) === find(b)) {
+				loops++;
+				near = at;
+			} else parent.set(find(a), find(b));
+		};
+		const netPads = pads.filter((p) => p.net === net);
+		const snap = (x: number, y: number) => {
+			for (const p of netPads) if (Math.abs(x - p.x) <= p.w / 2 + 0.01 && Math.abs(y - p.y) <= p.h / 2 + 0.01) return key(p.x, p.y);
+			return key(x, y);
+		};
+		const points = new Map<string, Set<number>>(); // point -> layers present
+		const note = (pt: string, l: number) => (points.get(pt) || points.set(pt, new Set()).get(pt)!).add(l);
+		for (const t of segs.filter((q) => q.net === net)) {
+			const a = snap(t.x1, t.y1),
+				b = snap(t.x2, t.y2);
+			note(a, t.layer);
+			note(b, t.layer);
+			if (a === b) continue;
+			join(`${a}|${t.layer}`, `${b}|${t.layer}`, [t.x1, t.y1]);
+		}
+		// a via, or a through-hole pad, connects all layers present at its point
+		const linkLayers = (pt: string, at: [number, number]) => {
+			const ls = [...(points.get(pt) ?? [])];
+			for (let i = 1; i < ls.length; i++) join(`${pt}|${ls[0]}`, `${pt}|${ls[i]}`, at);
+		};
+		for (const v of vias.filter((q) => q.net === net)) linkLayers(snap(v.x, v.y), [v.x, v.y]);
+		for (const p of netPads.filter((q) => q.layers.length > 1)) linkLayers(key(p.x, p.y), [p.x, p.y]);
+		if (loops > 0) out.push({ net, loops, near });
+	}
+	return out;
+}
