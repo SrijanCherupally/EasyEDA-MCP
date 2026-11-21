@@ -1,5 +1,7 @@
 # EasyEDA MCP
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/srijancherupally-easyeda-mcp-fv5wvo?variant=verified&v=4be538929bfe21876358f1914335344b)](https://m8ven.ai/mcp/srijancherupally-easyeda-mcp-fv5wvo?s=readme)
+
 **Live, end-to-end PCB design in EasyEDA Pro for AI agents** — schematic capture, readable wiring, live JLCPCB stock & part class, PCB placement, autorouting, copper pours, DRC and fab exports — through the [Model Context Protocol](https://modelcontextprotocol.io).
 
 Works with Claude Code, Claude Desktop, Codex, Cursor and any MCP client. Several agents can be connected to the same EasyEDA window at the same time.
