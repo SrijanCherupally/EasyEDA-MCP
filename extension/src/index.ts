@@ -10,7 +10,7 @@ import Sval from 'sval';
 
 declare const eda: any;
 
-const RUNTIME_VERSION = '1.0.4';
+const RUNTIME_VERSION = '1.0.5';
 const LOADED_AT = Date.now();
 const DEFAULT_PORT = 18765;
 const HEARTBEAT_TIMEOUT_MS = 15000;
@@ -352,7 +352,9 @@ function openSocket() {
 	state.connecting = true;
 	state.attempt++;
 	state.port = getPort();
-	const id = 'easyeda-mcp-' + state.attempt;
+	// The socket id is global inside EasyEDA: two runtime instances using the same id
+	// (e.g. 'easyeda-mcp-1') close each other's sockets in an endless loop. Make it unique.
+	const id = 'easyeda-mcp-' + state.instanceId + '-' + state.attempt + '-' + Date.now().toString(36);
 	state.socketId = id;
 	const uri = `ws://127.0.0.1:${state.port}/eda`;
 	const attemptAt = Date.now();
